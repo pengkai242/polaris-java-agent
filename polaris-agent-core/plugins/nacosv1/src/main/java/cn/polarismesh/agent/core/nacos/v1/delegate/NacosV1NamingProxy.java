@@ -14,10 +14,14 @@ import com.alibaba.nacos.common.utils.HttpMethod;
 import com.alibaba.nacos.common.utils.JacksonUtils;
 import com.alibaba.nacos.common.utils.StringUtils;
 import com.google.common.base.Strings;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -31,7 +35,11 @@ public class NacosV1NamingProxy extends NamingProxy {
     private int maxRetry;
 
     private String targetNacosDomain;
+    //设置路由标签，实现根据标签进行优先访问
+    private String routeLabel;
 
+    //用来表示是否开启根据路由标签访问优先
+    private boolean routeEnable;
 
     private static final Map<String, Boolean> nacosCallCache = new ConcurrentHashMap<>(256);
 
@@ -42,7 +50,11 @@ public class NacosV1NamingProxy extends NamingProxy {
 
         targetNacosDomain = System.getProperty(NacosConstants.TARGET_NACOS_SERVER_ADDR);
 //        Objects.requireNonNull(targetNacosDomain);
-
+        routeLabel = System.getProperty(NacosConstants.ROUTE_LABEL);
+        routeEnable = Boolean.getBoolean(NacosConstants.ROUTE_ENABLE);
+        if (routeEnable) {
+            Objects.requireNonNull(routeLabel, "routeLabel is null");
+        }
         init();
     }
 
@@ -124,13 +136,40 @@ public class NacosV1NamingProxy extends NamingProxy {
                     hosts.add(host);
                 }
             }
-            serviceInfo.setHosts(hosts);
+            // 对hosts进行过滤
+            List<Instance> finalHosts = filterInstances(hosts);
+            serviceInfo.setHosts(finalHosts);
             return JacksonUtils.toJson(serviceInfo);
         }catch(Exception exp){
             NAMING_LOGGER.error("NacosV1NamingProxy mergeResult request {} failed.", targetNacosDomain, exp);
         }
         return result;
 
+    }
+
+    /**
+     * filterInstances 对实例列表进行过滤筛选.
+     *
+     * @param hosts
+     * @return
+     */
+    private List<Instance> filterInstances(List<Instance> hosts) {
+
+        // 针对服务实例做特殊处理，如果开启同nacos集群优先，则优先返回同nacos集群的实例
+        if (!routeEnable) {
+            return hosts;
+        }
+        List<Instance> finalHosts = Lists.newArrayList();
+        for (Instance instance : hosts) {
+            String routeLabel = Optional.ofNullable(instance.getMetadata()).orElse(Maps.newHashMap()).get(NacosConstants.ROUTE_LABEL);
+            if (this.routeLabel.equals(routeLabel)) {
+                finalHosts.add(instance);
+            }
+        }
+        if (finalHosts.isEmpty()) {
+            return hosts;
+        }
+        return finalHosts;
     }
 
     /**
@@ -147,11 +186,31 @@ public class NacosV1NamingProxy extends NamingProxy {
     @Override
     public String reqAPI(String api, Map<String, String> params, String body, List<String> servers,
             String method) throws NacosException {
+        fillMetadata(api, params, method);
+
         String sourceResult = super.reqAPI(api, params, body, servers, method);
         //处理对目的地址的请求,即使报错也不能影响原有的server调用
         callServerForTarget(api, params, body, method);
         return sourceResult;
 
+    }
+
+    /**
+     * fillMetadata 补充元数据信息.
+     *
+     * @param api
+     * @param params
+     * @param method
+     */
+    private void fillMetadata(String api, Map<String, String> params, String method) {
+
+        String fullApi = api + NacosConstants.LINK_FLAG + method;
+        // 针对服务注册做特殊处理，如果开启根据路由标签优先访问，则增加metadata数据：routeLabel
+        if (routeEnable && fullApi.equals(NacosConstants.REGISTER_SERVICE)) {
+            Map<String, String> metadata = JacksonUtils.toObj(params.get(NacosConstants.METADATA), Map.class);
+            metadata.put(NacosConstants.ROUTE_LABEL, routeLabel);
+            params.put(NacosConstants.METADATA, JacksonUtils.toJson(metadata));
+        }
     }
 
     /**

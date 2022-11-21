@@ -29,6 +29,12 @@ public class NacosConstants {
 
     //tse nacos server address
     public static final String TARGET_NACOS_SERVER_ADDR = "target.nacos.server.addr";
+    //设置路由标签，实现根据标签进行优先访问
+    public static final String ROUTE_LABEL = "route.label";
+
+    //用来表示是否开启根据路由标签访问优先
+    public static final String ROUTE_ENABLE = "route.enable";
+    public static final String METADATA = "metadata";
 
     //反射所有属性名称
     public static final String CACHE_DIR = "cacheDir";
