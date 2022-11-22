@@ -14,9 +14,13 @@ import com.alibaba.nacos.client.naming.cache.ServiceInfoHolder;
 import com.alibaba.nacos.client.naming.event.InstancesChangeNotifier;
 import com.alibaba.nacos.client.naming.remote.NamingClientProxy;
 import com.alibaba.nacos.client.naming.remote.NamingClientProxyDelegate;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 
@@ -32,11 +36,20 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
     private NamingClientProxy targetClientProxy;
 
     private String targetNacosDomain;
+    //设置路由标签，实现根据标签进行优先访问
+    private String routeLabel;
 
+    //用来表示是否开启根据路由标签访问优先
+    private boolean routeEnable;
     public NamingClientProxyAdapter(String namespace, ServiceInfoHolder serviceInfoHolder, Properties properties,
             InstancesChangeNotifier changeNotifier) throws NacosException {
         this.clientProxy = new NamingClientProxyDelegate(namespace, serviceInfoHolder, properties, changeNotifier);
         targetNacosDomain = System.getProperty(NacosConstants.TARGET_NACOS_SERVER_ADDR);
+        routeLabel = System.getProperty(NacosConstants.ROUTE_LABEL);
+        routeEnable = Boolean.getBoolean(NacosConstants.ROUTE_ENABLE);
+        if (routeEnable) {
+            Objects.requireNonNull(routeLabel, "routeLabel is null");
+        }
         //组装target nacos的properties配置信息
         Properties targetProperties = new Properties();
         targetProperties.putAll(properties);
@@ -47,8 +60,22 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
 
     @Override
     public void registerService(String serviceName, String groupName, Instance instance) throws NacosException {
+        fillMetadata(instance);
         clientProxy.registerService(serviceName, groupName, instance);
         targetClientProxy.registerService(serviceName, groupName, instance);
+    }
+
+    /**
+     * fillMetadata 补充元数据信息.
+     *
+     * @param instance
+     */
+    private void fillMetadata(Instance instance) {
+
+        // 针对服务注册做特殊处理，如果开启根据路由标签优先访问，则增加metadata数据：routeLabel
+        if (routeEnable) {
+            instance.addMetadata(NacosConstants.ROUTE_LABEL, routeLabel);
+        }
     }
 
     @Override
@@ -101,12 +128,39 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
                     hosts.add(host);
                 }
             }
-            serviceInfo.setHosts(hosts);
+            // 对hosts进行过滤
+            List<Instance> finalHosts = filterInstances(hosts);
+            serviceInfo.setHosts(finalHosts);
         }catch(Exception exp){
             NAMING_LOGGER.error("NamingClientProxyAdapter mergeInstances request {} failed.", targetNacosDomain, exp);
         }
         return serviceInfo;
 
+    }
+
+    /**
+     * filterInstances 对实例列表进行过滤筛选.
+     *
+     * @param hosts
+     * @return
+     */
+    private List<Instance> filterInstances(List<Instance> hosts) {
+
+        // 针对服务实例做特殊处理，如果开启同nacos集群优先，则优先返回同nacos集群的实例
+        if (!routeEnable) {
+            return hosts;
+        }
+        List<Instance> finalHosts = Lists.newArrayList();
+        for (Instance instance : hosts) {
+            String routeLabel = Optional.ofNullable(instance.getMetadata()).orElse(Maps.newHashMap()).get(NacosConstants.ROUTE_LABEL);
+            if (this.routeLabel.equals(routeLabel)) {
+                finalHosts.add(instance);
+            }
+        }
+        if (finalHosts.isEmpty()) {
+            return hosts;
+        }
+        return finalHosts;
     }
 
     @Override
