@@ -3,7 +3,7 @@ package cn.polarismesh.agent.core.nacos.adapter;
 import static com.alibaba.nacos.client.utils.LogUtils.NAMING_LOGGER;
 
 import cn.polarismesh.agent.core.nacos.constants.NacosConstants;
-import cn.polarismesh.agent.core.nacos.route.NearbyBaseRouter;
+import cn.polarismesh.agent.core.nacos.route.NearbyRouter;
 import com.alibaba.nacos.api.PropertyKeyConst;
 import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.naming.pojo.Instance;
@@ -20,6 +20,7 @@ import com.google.common.collect.Maps;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
@@ -33,25 +34,30 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
 
     private NamingClientProxy clientProxy;
 
-    private NamingClientProxy targetClientProxy;
+    private NamingClientProxy otherClientProxy;
 
-    private String targetNacosDomain;
+    private String otherNacosDomain;
 
-    private NearbyBaseRouter nearbyBaseRouter;
+    private String nacosClusterName;
+
+    private NearbyRouter nearbyRouter;
 
     public NamingClientProxyAdapter(String namespace, ServiceInfoHolder serviceInfoHolder, Properties properties,
             InstancesChangeNotifier changeNotifier) throws NacosException {
         this.clientProxy = new NamingClientProxyDelegate(namespace, serviceInfoHolder, properties, changeNotifier);
-        targetNacosDomain = System.getProperty(NacosConstants.TARGET_NACOS_SERVER_ADDR);
+        this.otherNacosDomain = System.getProperty(NacosConstants.OTHER_NACOS_SERVER_ADDR);
+        this.nacosClusterName = System.getProperty(NacosConstants.NACOS_CLUSTER_NAME);
 
-        this.nearbyBaseRouter = NearbyBaseRouter.getRouter();
-        this.nearbyBaseRouter.init();
+        Objects.requireNonNull(this.otherNacosDomain,"other nacos server addr can not be empty");
+        Objects.requireNonNull(this.nacosClusterName,"nacos cluster name can not be empty");
+        this.nearbyRouter = NearbyRouter.getRouter();
+        this.nearbyRouter.init();
 
         //组装target nacos的properties配置信息
         Properties targetProperties = new Properties();
         targetProperties.putAll(properties);
-        targetProperties.setProperty(PropertyKeyConst.SERVER_ADDR, targetNacosDomain);
-        this.targetClientProxy = new NamingClientProxyDelegate(namespace, serviceInfoHolder, targetProperties, changeNotifier);
+        targetProperties.setProperty(PropertyKeyConst.SERVER_ADDR, otherNacosDomain);
+        this.otherClientProxy = new NamingClientProxyDelegate(namespace, serviceInfoHolder, targetProperties, changeNotifier);
 
     }
 
@@ -59,7 +65,7 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
     public void registerService(String serviceName, String groupName, Instance instance) throws NacosException {
         fillMetadata(instance);
         clientProxy.registerService(serviceName, groupName, instance);
-        targetClientProxy.registerService(serviceName, groupName, instance);
+        otherClientProxy.registerService(serviceName, groupName, instance);
     }
 
     /**
@@ -68,17 +74,13 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
      * @param instance
      */
     private void fillMetadata(Instance instance) {
-
-        // 针对服务注册做特殊处理，如果开启根据路由标签优先访问，则增加metadata数据：router.match.level.cloud.label
-        if (nearbyBaseRouter.isEnable() && nearbyBaseRouter.isMatchLevelCloud()) {
-            instance.addMetadata(NacosConstants.ROUTER_MATCH_LEVEL_CLOUD_LABEL, nearbyBaseRouter.getMatchLevelCloudLabel());
-        }
+        instance.addMetadata(NacosConstants.NACOS_CLUSTER_NAME, this.nacosClusterName);
     }
 
     @Override
     public void deregisterService(String serviceName, String groupName, Instance instance) throws NacosException {
         clientProxy.deregisterService(serviceName, groupName, instance);
-        targetClientProxy.deregisterService(serviceName, groupName, instance);
+        otherClientProxy.deregisterService(serviceName, groupName, instance);
     }
 
     @Override
@@ -90,7 +92,8 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
     public ServiceInfo queryInstancesOfService(String serviceName, String groupName, String clusters, int udpPort,
             boolean healthyOnly) throws NacosException {
         ServiceInfo serviceInfo = clientProxy.queryInstancesOfService(serviceName, groupName, clusters, udpPort, healthyOnly);
-        ServiceInfo targetServiceInfo = targetClientProxy.queryInstancesOfService(serviceName, groupName, clusters, udpPort, healthyOnly);
+        ServiceInfo targetServiceInfo = otherClientProxy
+                .queryInstancesOfService(serviceName, groupName, clusters, udpPort, healthyOnly);
 
         return mergeInstances(serviceInfo, targetServiceInfo);
     }
@@ -129,7 +132,7 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
             List<Instance> finalHosts = filterInstances(hosts);
             serviceInfo.setHosts(finalHosts);
         }catch(Exception exp){
-            NAMING_LOGGER.error("NamingClientProxyAdapter mergeInstances request {} failed.", targetNacosDomain, exp);
+            NAMING_LOGGER.error("NamingClientProxyAdapter mergeInstances request {} failed.", otherNacosDomain, exp);
         }
         return serviceInfo;
 
@@ -144,20 +147,36 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
     private List<Instance> filterInstances(List<Instance> hosts) {
 
         // 针对服务实例做特殊处理，如果开启同nacos集群优先，则优先返回同nacos集群的实例
-        if (!nearbyBaseRouter.isEnable()) {
+        if (!nearbyRouter.isEnable()) {
             return hosts;
         }
+
         List<Instance> finalHosts = Lists.newArrayList();
-        for (Instance instance : hosts) {
-            String matchLevelCloudLabel = Optional.ofNullable(instance.getMetadata()).orElse(Maps.newHashMap()).get(NacosConstants.ROUTER_MATCH_LEVEL_CLOUD_LABEL);
-            if (this.nearbyBaseRouter.getMatchLevelCloudLabel().equals(matchLevelCloudLabel)) {
-                finalHosts.add(instance);
-            }
+
+        if (nearbyRouter.isNearbyNacosCluster()){
+            filterByNearbyNacosCluster(hosts, finalHosts);
         }
+
         if (finalHosts.isEmpty()) {
             return hosts;
         }
         return finalHosts;
+    }
+
+    /**
+     * filterByNearbyNacosCluster NearbyNacosCluster方式对实例列表进行过滤筛选.
+     *
+     * @param hosts
+     * @param finalHosts
+     * @return
+     */
+    private void filterByNearbyNacosCluster(List<Instance> hosts, List<Instance> finalHosts) {
+        for (Instance instance : hosts) {
+            String nacosClusterName = Optional.ofNullable(instance.getMetadata()).orElse(Maps.newHashMap()).get(NacosConstants.NACOS_CLUSTER_NAME);
+            if (this.nacosClusterName.equals(nacosClusterName)) {
+                finalHosts.add(instance);
+            }
+        }
     }
 
     @Override
@@ -190,25 +209,26 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
     @Override
     public ServiceInfo subscribe(String serviceName, String groupName, String clusters) throws NacosException {
         ServiceInfo serviceInfo = clientProxy.subscribe(serviceName, groupName, clusters);
-        ServiceInfo targetServiceInfo = targetClientProxy.subscribe(serviceName, groupName, clusters);
+        ServiceInfo targetServiceInfo = otherClientProxy.subscribe(serviceName, groupName, clusters);
         return mergeInstances(serviceInfo, targetServiceInfo);
     }
 
     @Override
     public void unsubscribe(String serviceName, String groupName, String clusters) throws NacosException {
         clientProxy.unsubscribe(serviceName, groupName, clusters);
-        targetClientProxy.unsubscribe(serviceName, groupName, clusters);
+        otherClientProxy.unsubscribe(serviceName, groupName, clusters);
     }
 
     @Override
     public boolean isSubscribed(String serviceName, String groupName, String clusters) throws NacosException {
-        return clientProxy.isSubscribed(serviceName, groupName, clusters) || targetClientProxy.isSubscribed(serviceName, groupName, clusters) ;
+        return clientProxy.isSubscribed(serviceName, groupName, clusters) || otherClientProxy
+                .isSubscribed(serviceName, groupName, clusters) ;
     }
 
     @Override
     public void updateBeatInfo(Set<Instance> modifiedInstances) {
         clientProxy.updateBeatInfo(modifiedInstances);
-        targetClientProxy.updateBeatInfo(modifiedInstances);
+        otherClientProxy.updateBeatInfo(modifiedInstances);
     }
 
     @Override
@@ -219,6 +239,6 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
     @Override
     public void shutdown() throws NacosException {
         clientProxy.shutdown();
-        targetClientProxy.shutdown();
+        otherClientProxy.shutdown();
     }
 }

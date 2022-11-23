@@ -27,16 +27,13 @@ import com.alibaba.nacos.common.utils.HttpMethod;
  */
 public class NacosConstants {
 
-    //tse nacos server address
-    public static final String TARGET_NACOS_SERVER_ADDR = "target.nacos.server.addr";
-
-    //是否开启就近路由
-    public static final String NEARBY_BASED_ROUTER_ENABLE = "nearby.based.router.enable";
-    //就近路由的匹配级别
-    public static final String ROUTER_MATCH_LEVELS = "router.match.levels";
-    //云标签
-    public static final String ROUTER_MATCH_LEVEL_CLOUD_LABEL = "router.match.level.cloud.label";
-
+    //other nacos server address
+    public static final String OTHER_NACOS_SERVER_ADDR = "other.nacos.server.addr";
+    //主 Nacos 集群名称
+    public static final String NACOS_CLUSTER_NAME = "nacos.cluster.name";
+    //就近路由级别（null, nacos-cluster），默认为null
+    public static final String ROUTER_NEARBY_LEVEL = "router.nearby.level";
+    //元数据key
     public static final String METADATA = "metadata";
 
     //反射所有属性名称
