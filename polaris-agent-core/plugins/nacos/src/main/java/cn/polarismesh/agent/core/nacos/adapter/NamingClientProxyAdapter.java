@@ -48,24 +48,33 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
         this.otherNacosDomain = System.getProperty(NacosConstants.OTHER_NACOS_SERVER_ADDR);
         this.nacosClusterName = System.getProperty(NacosConstants.NACOS_CLUSTER_NAME);
 
-        Objects.requireNonNull(this.otherNacosDomain,"other nacos server addr can not be empty");
-        Objects.requireNonNull(this.nacosClusterName,"nacos cluster name can not be empty");
+        Objects.requireNonNull(this.otherNacosDomain, "other nacos server addr can not be empty");
+        Objects.requireNonNull(this.nacosClusterName, "nacos cluster name can not be empty");
         this.nearbyRouter = NearbyRouter.getRouter();
         this.nearbyRouter.init();
 
-        //组装target nacos的properties配置信息
-        Properties targetProperties = new Properties();
-        targetProperties.putAll(properties);
-        targetProperties.setProperty(PropertyKeyConst.SERVER_ADDR, otherNacosDomain);
-        this.otherClientProxy = new NamingClientProxyDelegate(namespace, serviceInfoHolder, targetProperties, changeNotifier);
+        //组装other nacos的properties配置信息
+        Properties otherProperties = new Properties();
+        otherProperties.putAll(properties);
+        otherProperties.setProperty(PropertyKeyConst.SERVER_ADDR, otherNacosDomain);
+        this.otherClientProxy = new NamingClientProxyDelegate(namespace, serviceInfoHolder, otherProperties,
+                changeNotifier);
 
     }
 
     @Override
     public void registerService(String serviceName, String groupName, Instance instance) throws NacosException {
         fillMetadata(instance);
-        clientProxy.registerService(serviceName, groupName, instance);
-        otherClientProxy.registerService(serviceName, groupName, instance);
+        try {
+            clientProxy.registerService(serviceName, groupName, instance);
+        } catch (Exception exp) {
+            NAMING_LOGGER.error("NamingClientProxyAdapter clientProxy registerService err.", exp);
+        }
+        try {
+            otherClientProxy.registerService(serviceName, groupName, instance);
+        } catch (Exception exp) {
+            NAMING_LOGGER.error("NamingClientProxyAdapter otherClientProxy registerService err.", exp);
+        }
     }
 
     /**
@@ -79,8 +88,16 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
 
     @Override
     public void deregisterService(String serviceName, String groupName, Instance instance) throws NacosException {
-        clientProxy.deregisterService(serviceName, groupName, instance);
-        otherClientProxy.deregisterService(serviceName, groupName, instance);
+        try {
+            clientProxy.deregisterService(serviceName, groupName, instance);
+        } catch (Exception exp) {
+            NAMING_LOGGER.error("NamingClientProxyAdapter clientProxy deregisterService err.", exp);
+        }
+        try {
+            otherClientProxy.deregisterService(serviceName, groupName, instance);
+        } catch (Exception exp) {
+            NAMING_LOGGER.error("NamingClientProxyAdapter otherClientProxy deregisterService err.", exp);
+        }
     }
 
     @Override
@@ -91,38 +108,49 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
     @Override
     public ServiceInfo queryInstancesOfService(String serviceName, String groupName, String clusters, int udpPort,
             boolean healthyOnly) throws NacosException {
-        ServiceInfo serviceInfo = clientProxy.queryInstancesOfService(serviceName, groupName, clusters, udpPort, healthyOnly);
-        ServiceInfo targetServiceInfo = otherClientProxy
-                .queryInstancesOfService(serviceName, groupName, clusters, udpPort, healthyOnly);
+        ServiceInfo serviceInfo = null;
+        try {
+            serviceInfo = clientProxy.queryInstancesOfService(serviceName, groupName, clusters, udpPort, healthyOnly);
+        } catch (Exception exp) {
+            NAMING_LOGGER.error("NamingClientProxyAdapter clientProxy queryInstancesOfService err.", exp);
+        }
+        ServiceInfo otherServiceInfo = null;
+        try {
+            otherServiceInfo = otherClientProxy
+                    .queryInstancesOfService(serviceName, groupName, clusters, udpPort, healthyOnly);
+        } catch (Exception exp) {
+            NAMING_LOGGER.error("NamingClientProxyAdapter otherClientProxy queryInstancesOfService err.", exp);
+        }
 
-        return mergeInstances(serviceInfo, targetServiceInfo);
+        return mergeInstances(serviceInfo, otherServiceInfo);
     }
 
     /**
      * 合并两个nacos server的实例列表
+     *
      * @param serviceInfo
-     * @param secondServiceInfo
+     * @param otherServiceInfo
      */
-    private ServiceInfo mergeInstances(ServiceInfo serviceInfo, ServiceInfo secondServiceInfo) {
+    private ServiceInfo mergeInstances(ServiceInfo serviceInfo, ServiceInfo otherServiceInfo) {
 
-        if (secondServiceInfo == null) {
+        if (otherServiceInfo == null) {
             return serviceInfo;
         }
 
         if (serviceInfo == null) {
-            return secondServiceInfo;
+            return otherServiceInfo;
         }
 
         try {
-            List<Instance> hosts =  serviceInfo.getHosts();
-            List<Instance> secondHosts =  secondServiceInfo.getHosts();
+            List<Instance> hosts = serviceInfo.getHosts();
+            List<Instance> otherHosts = otherServiceInfo.getHosts();
 
             Map<String, Instance> hostMap = new HashMap<String, Instance>(hosts.size());
             for (Instance host : hosts) {
                 hostMap.put(host.toInetAddr(), host);
             }
 
-            for (Instance host : secondHosts) {
+            for (Instance host : otherHosts) {
                 String inetAddr = host.toInetAddr();
                 if (hostMap.get(inetAddr) == null) {
                     hosts.add(host);
@@ -131,7 +159,7 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
             // 对hosts进行过滤
             List<Instance> finalHosts = filterInstances(hosts);
             serviceInfo.setHosts(finalHosts);
-        }catch(Exception exp){
+        } catch (Exception exp) {
             NAMING_LOGGER.error("NamingClientProxyAdapter mergeInstances request {} failed.", otherNacosDomain, exp);
         }
         return serviceInfo;
@@ -153,7 +181,7 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
 
         List<Instance> finalHosts = Lists.newArrayList();
 
-        if (nearbyRouter.isNearbyNacosCluster()){
+        if (nearbyRouter.isNearbyNacosCluster()) {
             filterByNearbyNacosCluster(hosts, finalHosts);
         }
 
@@ -172,7 +200,8 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
      */
     private void filterByNearbyNacosCluster(List<Instance> hosts, List<Instance> finalHosts) {
         for (Instance instance : hosts) {
-            String nacosClusterName = Optional.ofNullable(instance.getMetadata()).orElse(Maps.newHashMap()).get(NacosConstants.NACOS_CLUSTER_NAME);
+            String nacosClusterName = Optional.ofNullable(instance.getMetadata()).orElse(Maps.newHashMap())
+                    .get(NacosConstants.NACOS_CLUSTER_NAME);
             if (this.nacosClusterName.equals(nacosClusterName)) {
                 finalHosts.add(instance);
             }
@@ -208,27 +237,56 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
 
     @Override
     public ServiceInfo subscribe(String serviceName, String groupName, String clusters) throws NacosException {
-        ServiceInfo serviceInfo = clientProxy.subscribe(serviceName, groupName, clusters);
-        ServiceInfo targetServiceInfo = otherClientProxy.subscribe(serviceName, groupName, clusters);
-        return mergeInstances(serviceInfo, targetServiceInfo);
+        ServiceInfo serviceInfo = null;
+        try {
+            serviceInfo = clientProxy.subscribe(serviceName, groupName, clusters);
+        }catch (Exception exp){
+            NAMING_LOGGER.error("NamingClientProxyAdapter clientProxy subscribe err.", exp);
+        }
+
+        ServiceInfo otherServiceInfo = null;
+        try {
+            otherServiceInfo = otherClientProxy.subscribe(serviceName, groupName, clusters);
+        }catch (Exception exp){
+            NAMING_LOGGER.error("NamingClientProxyAdapter otherClientProxy subscribe err.", exp);
+        }
+        return mergeInstances(serviceInfo, otherServiceInfo);
     }
 
     @Override
     public void unsubscribe(String serviceName, String groupName, String clusters) throws NacosException {
-        clientProxy.unsubscribe(serviceName, groupName, clusters);
-        otherClientProxy.unsubscribe(serviceName, groupName, clusters);
+        try {
+            clientProxy.unsubscribe(serviceName, groupName, clusters);
+        }catch (Exception exp){
+            NAMING_LOGGER.error("NamingClientProxyAdapter clientProxy unsubscribe err.", exp);
+        }
+
+        try {
+            otherClientProxy.unsubscribe(serviceName, groupName, clusters);
+        }catch (Exception exp){
+            NAMING_LOGGER.error("NamingClientProxyAdapter otherClientProxy unsubscribe err.", exp);
+        }
     }
 
     @Override
     public boolean isSubscribed(String serviceName, String groupName, String clusters) throws NacosException {
         return clientProxy.isSubscribed(serviceName, groupName, clusters) || otherClientProxy
-                .isSubscribed(serviceName, groupName, clusters) ;
+                .isSubscribed(serviceName, groupName, clusters);
     }
 
     @Override
     public void updateBeatInfo(Set<Instance> modifiedInstances) {
-        clientProxy.updateBeatInfo(modifiedInstances);
-        otherClientProxy.updateBeatInfo(modifiedInstances);
+        try {
+            clientProxy.updateBeatInfo(modifiedInstances);
+        }catch (Exception exp){
+            NAMING_LOGGER.error("NamingClientProxyAdapter clientProxy updateBeatInfo err.", exp);
+        }
+
+        try {
+            otherClientProxy.updateBeatInfo(modifiedInstances);
+        }catch (Exception exp){
+            NAMING_LOGGER.error("NamingClientProxyAdapter otherClientProxy updateBeatInfo err.", exp);
+        }
     }
 
     @Override
@@ -238,7 +296,16 @@ public class NamingClientProxyAdapter implements NamingClientProxy {
 
     @Override
     public void shutdown() throws NacosException {
-        clientProxy.shutdown();
-        otherClientProxy.shutdown();
+        try {
+            clientProxy.shutdown();
+        }catch (Exception exp){
+            NAMING_LOGGER.error("NamingClientProxyAdapter clientProxy shutdown err.", exp);
+        }
+
+        try {
+            otherClientProxy.shutdown();
+        }catch (Exception exp){
+            NAMING_LOGGER.error("NamingClientProxyAdapter otherClientProxy shutdown err.", exp);
+        }
     }
 }
