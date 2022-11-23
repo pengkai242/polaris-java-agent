@@ -33,7 +33,7 @@ public class NacosConstants {
     public static final String NACOS_CLUSTER_NAME = "nacos.cluster.name";
     //就近路由级别（null, nacos-cluster），默认为null
     public static final String ROUTER_NEARBY_LEVEL = "router.nearby.level";
-    //元数据key
+    //元数据标示
     public static final String METADATA = "metadata";
 
     //反射所有属性名称
